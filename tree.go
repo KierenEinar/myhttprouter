@@ -354,9 +354,12 @@ walk:
 		//  --- ccc
 		// /abc /ccc
 
-		tsr = len(prefix) == len(path)+1 && prefix[:len(path)] == path &&
-			prefix[len(path)] == '/' && n.Handle != nil
+		// /x
+		// /x/y
+		// search query /x/
 
+		tsr = path == "/" || (len(prefix) == len(path)+1 && prefix[:len(path)] == path &&
+			prefix[len(path)] == '/' && n.Handle != nil)
 		return
 
 	}
