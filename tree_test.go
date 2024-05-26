@@ -15,7 +15,7 @@ func fakeHandler(val string) Handle {
 
 func TestNode_AddAndGet(t *testing.T) {
 
-	tree := &Node{}
+	tree := &node{}
 
 	routes := [...]string{
 		"/",
@@ -64,7 +64,7 @@ func TestNode_AddAndGet(t *testing.T) {
 
 func TestNode_TrailingRedirectSlash(t *testing.T) {
 
-	tree := &Node{}
+	tree := &node{}
 
 	routes := [...]string{
 		"/hi",

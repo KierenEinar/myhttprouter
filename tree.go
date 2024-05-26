@@ -10,13 +10,14 @@ const (
 	nStatic nodeType = iota
 	nRoot
 	nParam
+	nCatchAll
 )
 
-type Node struct {
+type node struct {
 	Path      string
 	Indices   string
 	Handle    Handle
-	Children  []*Node
+	Children  []*node
 	nType     nodeType
 	wildChild bool
 }
@@ -63,59 +64,54 @@ func findWildChild(path string) (wildChild string, start int, valid bool) {
 
 }
 
-func (n *Node) addRoute(fullPath string, h Handle) {
+func (n *node) addRoute(fullPath string, h Handle) {
 
-	// check if current node is root node
+	path := fullPath
+
 	if len(n.Path) == 0 && len(n.Indices) == 0 {
 		n.insertChild(fullPath, h)
 		n.nType = nRoot
 		return
 	}
 
-	path := fullPath
-
 walk:
+
 	for {
 
 		i := longestCommonPrefix(n.Path, path)
 
-		if i < len(n.Path) { // split current node, because path has common prefix with n.Path[:i]
+		if i < len(n.Path) {
 
-			child := &Node{
+			// split current node with 2part, first part is the common prefix, second part is the different path.
+			child := &node{
 				Path:      n.Path[i:],
 				Indices:   n.Indices,
 				Handle:    n.Handle,
 				Children:  n.Children,
-				nType:     nStatic,
+				nType:     nStatic, // we're sure that current node must not params and catchall type.
 				wildChild: n.wildChild,
 			}
 
 			n.Path = n.Path[:i]
 			n.Indices = string(child.Path[0])
 			n.Handle = nil
-			n.Children = []*Node{child}
+			n.Children = []*node{child}
 			n.wildChild = false
-
 		}
 
-		if i < len(path) { // we split the path into path[:i] and the path[i:] part, first one is the common prefix,
-			// second one is the rest and will look up the child node to insert or just insert a new node,
-			//and current instructions just take care of the second one.
+		if i < len(path) {
 
 			path = path[i:]
 
-			if n.wildChild { // see if the node has wildcard, because indices is empty.
-
-				// per segment only have one param type path, so we need to check it.
-
+			if n.wildChild {
 				n = n.Children[0]
 				if len(path) >= len(n.Path) && path[:len(n.Path)] == n.Path &&
-					((len(path) > len(n.Path) && path[len(n.Path)] == '/') || (len(path) == len(n.Path))) {
+					n.nType != nCatchAll &&
+					((len(path) == len(n.Path)) || (len(path) > len(n.Path) && path[len(n.Path)] == '/')) {
 					continue walk
+				} else {
+					panic("param segment path math an existing path which means conflict")
 				}
-
-				panic("per segment only have one param type path")
-
 			}
 
 			idxc := path[0]
@@ -127,18 +123,20 @@ walk:
 				}
 			}
 
-			if idxc != '*' && idxc != ':' {
-				n.Indices += string(idxc)
-				child := &Node{}
+			if idxc != ':' && idxc != '*' {
+				child := &node{}
 				n.Children = append(n.Children, child)
+				n.Indices += string(idxc)
 				n = child
 			}
 
 			n.insertChild(path, h)
-
 			return
 		}
 
+		if h == nil {
+			panic("handler can't replace with an existing path because is nil")
+		}
 		n.Handle = h
 		return
 
@@ -146,7 +144,7 @@ walk:
 
 }
 
-func (n *Node) insertChild(path string, h Handle) {
+func (n *node) insertChild(path string, h Handle) {
 
 	for {
 
@@ -156,34 +154,44 @@ func (n *Node) insertChild(path string, h Handle) {
 		}
 
 		if !valid {
-			panic("per segment only have one param type path")
+			panic("only one wildcard per path segment is allowed")
 		}
 
 		if len(wildcard) < 2 {
-			panic("invalid segment params")
+			panic("wildcards must be named with a non-empty name in path")
 		}
 
 		if len(n.Children) > 0 {
-			panic("only one wildcard segment is allowed in path '" + path + "'")
+			panic("wildcard segment conflicts with existing children in path")
 		}
 
+		n.wildChild = true
+
+		// params
 		if wildcard[0] == ':' {
 
 			if start > 0 {
 				n.Path = path[:start]
-				n.wildChild = true
+				n.nType = nStatic
+				path = path[start:]
 			}
-			child := &Node{
+
+			child := &node{
 				Path:  wildcard,
 				nType: nParam,
 			}
+
 			n.Children = append(n.Children, child)
-			n.wildChild = true
 			n = child
-			path = path[start+len(wildcard):]
-			if len(path) > 0 {
-				n.Indices += string(path[0])
-				child = &Node{}
+
+			if len(wildcard) < len(path) {
+
+				path = path[len(wildcard):]
+				child := &node{
+					nType: nStatic,
+				}
+
+				n.Indices = "/"
 				n.Children = append(n.Children, child)
 				n = child
 				continue
@@ -191,32 +199,54 @@ func (n *Node) insertChild(path string, h Handle) {
 
 			n.Handle = h
 			return
-
 		}
+
+		// catchall
+
+		if start+len(wildcard) != len(path) {
+			panic("catch-all routes are only allowed at the end of the path")
+		}
+
+		if len(n.Path) > 0 && n.Path[len(n.Path)-1] == '/' {
+			panic("catch-all conflicts with existing handle for the path segment root")
+		}
+
+		if path[start-1] != '/' {
+			panic("no / before catch-all")
+		}
+
+		n.Path = path[:start]
+		n.nType = nStatic
+
+		child := &node{
+			Path:   wildcard,
+			Handle: h,
+			nType:  nCatchAll,
+		}
+
+		n.Children = append(n.Children, child)
+
+		return
 
 	}
 
 	n.Path = path
 	n.Handle = h
+
 }
 
-func (n *Node) getValue(path string) (h Handle, params []Params, tsr bool) {
+func (n *node) getValue(path string) (h Handle, params []Params, tsr bool) {
 
 walk:
+
 	for {
 
 		prefix := n.Path
-		/**
-		case1: search path len > prefix len (which we should deal look up from parent to child)
-		case2: search path len == prefix len (which we should compare the prefix and the path)
-		case3: search path len < prefix len
-		*/
+
 		if len(path) > len(prefix) {
 
 			if path[:len(prefix)] == prefix {
-
 				if !n.wildChild {
-
 					idxc := path[len(prefix)]
 					for ix, c := range n.Indices {
 						if byte(c) == idxc {
@@ -225,22 +255,20 @@ walk:
 							continue walk
 						}
 					}
-					tsr = len(path) == len(prefix)+1 && idxc == '/' && n.Handle != nil
+					path = path[len(prefix):]
+					tsr = path == "/" && n.Handle != nil
 					return
 				}
 
-				// handle wild child
 				n = n.Children[0]
 				path = path[len(prefix):]
-
 				switch n.nType {
+
 				case nParam:
 
-					// iterate the path, and see it has loop until the end or match '/' to stop.
 					end := 0
-					// /abc -> end=4
-					// /abc/ -> end=5
 					for ; end < len(path) && path[end] != '/'; end++ {
+
 					}
 
 					params = append(params, Params{
@@ -257,9 +285,7 @@ walk:
 								continue walk
 							}
 						}
-						if end+1 == len(path) && idxc == '/' && n.Handle != nil {
-							tsr = true
-						}
+						tsr = end+1 == len(path) && n.Handle != nil
 						return
 					}
 
@@ -267,99 +293,68 @@ walk:
 						return
 					}
 
-					// no handle found !!!
-					/**
-					  case1:
-					  -- /admin
-					        --- /
-					          ---- :config
-					            ----- /
-					  search /admin/config
-					*/
 					tsr = len(n.Children) == 1 && n.Children[0].Path == "/" && n.Children[0].Handle != nil
+
+					return
+				case nCatchAll:
+
+					params = append(params, Params{
+						Param: n.Path[1:],
+						Value: path,
+					})
+
+					h = n.Handle
 					return
 
 				default:
-					return
+					panic("invalid node type")
 				}
 
 			}
 
 			return
 
-		} else if prefix == path {
+		} else if path == prefix {
 
 			if h = n.Handle; h != nil {
 				return
 			}
 
-			// no handle found !!!
-			// check if node is wildcard, there has two case
-			/**
-			case1:
-			/admin
-			/admin/:config
-			/admin/:config/:name
-			-- /admin
-			 --- /
-			  ---- :config
-				----- /
-			      ------ :name
-			search /admin/config/
-			*/
-			if path == "/" && n.wildChild && n.nType == nParam {
+			// enter for the scenario path = "/"
+
+			// case1 before entering the param
+			if path == "/" && n.wildChild && n.nType != nRoot {
 				tsr = true
 				return
 			}
-
-			/**
-			case2:
-			-- /admin
-			 --- /
-			  ---- :config
-			   ----- /
-			    ----- abc
-			    ----- cdf
-			/admin
-			/admin/:config/
-			/admin/:config/abc
-			/admin/:config/cdf
-			search /admin/area/
-
-			*/
+			// case2 after exiting the param
 
 			if path == "/" && n.nType == nStatic {
 				tsr = true
 				return
 			}
 
-			// see if we have the same path with prefix, and next child is "/" and handle not nil
-			for _, child := range n.Children {
-				if child.Path == "/" && child.Handle != nil {
-					tsr = true
+			for ix, c := range n.Indices {
+				if byte(c) == '/' {
+					n = n.Children[ix]
+					tsr = n.Path == "/" && n.Handle != nil
 					return
 				}
 			}
 
 			return
+
 		}
 
-		// path is shortest then prefix
+		// path is shorter than n.path
+		//  - path is part of n.path
+		//  - path not part of n.path
+		// path len eq n.path len
+		//  - path not eq n.path
 
-		// /admin/
-		// /admin
+		tsr = path == "/" || (len(path) < len(n.Path) && path == n.Path[:len(path)] &&
+			n.Path[len(path):] == "/" && n.Handle != nil)
 
-		// -- /
-		//  --- abc
-		//  --- ccc
-		// /abc /ccc
-
-		// /x
-		// /x/y
-		// search query /x/
-
-		tsr = path == "/" || (len(prefix) == len(path)+1 && prefix[:len(path)] == path &&
-			prefix[len(path)] == '/' && n.Handle != nil)
 		return
 
 	}
