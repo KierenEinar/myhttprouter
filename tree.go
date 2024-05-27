@@ -320,6 +320,11 @@ walk:
 				return
 			}
 
+			if n.wildChild && n.Children[0].nType == nCatchAll {
+				h = n.Children[0].Handle
+				return
+			}
+
 			// enter for the scenario path = "/"
 
 			// case1 before entering the param
